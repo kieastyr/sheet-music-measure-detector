@@ -1,0 +1,5 @@
+.venv/\n__pycache__/\n*.pdf\n/datasets/\nruns/
+data/**/*
+datasets/**/*.png
+datasets/**/*.jpg
+datasets/**/*.txt

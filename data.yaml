@@ -1,0 +1,8 @@
+path: ./datasets/measure-detection
+train: images/train
+val: images/val
+test:  # optional
+
+# Classes
+names:
+  0: measure
