@@ -1,5 +1,11 @@
-.venv/\n__pycache__/\n*.pdf\n/datasets/\nruns/
-data/**/*
+.venv/
+__pycache__/
+*.pdf
+*.pt
+.DS_Store
+cvat/
+runs/
 datasets/**/*.png
 datasets/**/*.jpg
 datasets/**/*.txt
+datasets/debug/
