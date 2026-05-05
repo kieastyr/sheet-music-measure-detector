@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "ultralytics>=8.4.21",
+    "onnx>=1.21.0",
 ]
 
 [tool.uv.sources]
