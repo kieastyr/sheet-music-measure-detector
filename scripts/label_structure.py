@@ -110,17 +110,46 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
     if curr_sys:
         systems.append(curr_sys)
 
+    # Merge adjacent systems that are connected by barlines spanning the gap.
+    # If a vertical line crosses more than 30% of the inter-system gap,
+    # the two systems belong to the same grand staff and should be unified.
+    merged = [systems[0]]
+    for i in range(1, len(systems)):
+        gap_top = merged[-1][-1][1]      # bottom of last stave in previous system
+        gap_bot = systems[i][0][0]       # top of first stave in current system
+        if gap_bot > gap_top:
+            gap_vert = vertical_lines[gap_top:gap_bot, :]
+            col_density = np.sum(gap_vert / 255, axis=0)
+            threshold = (gap_bot - gap_top) * 0.3
+            if np.any(col_density > threshold):
+                merged[-1] = merged[-1] + systems[i]
+                continue
+        merged.append(systems[i])
+    systems = merged
+
     yolo_labels = []
     # Class 0: system, Class 1: barline
 
     x_margin_px = int(img_w * 0.01)
+    half_staff = int(est_space) // 2
+    padding    = int(est_space * 4 * 2.0)
 
-    for sys in systems:
-        sys_y_min, sys_y_max = sys[0][0], sys[-1][1]
-        # Add vertical padding to system
-        padding = (sys_y_max - sys_y_min) * 0.2
-        sys_y_min_p = max(0, int(sys_y_min - padding))
-        sys_y_max_p = min(img_h, int(sys_y_max + padding))
+    # Pass 1: set shared boundaries at midpoint ± half_staff between adjacent systems.
+    # Start from bare content extents (sys_y_min / sys_y_max).
+    bounds = [
+        [int(sys[0][0]), int(sys[-1][1]), int(sys[0][0]), int(sys[-1][1])]
+        for sys in systems
+    ]
+    for i in range(len(bounds) - 1):
+        mid = (bounds[i][1] + bounds[i + 1][0]) // 2
+        bounds[i][3]     = int(mid + half_staff)  # A's bottom (shared side)
+        bounds[i + 1][2] = int(mid - half_staff)  # B's top    (shared side)
+
+    # Pass 2: add padding only to the outermost (non-shared) edges.
+    bounds[0][2]  = int(max(0,     bounds[0][0]  - padding))  # first system top
+    bounds[-1][3] = int(min(img_h, bounds[-1][1] + padding))  # last system bottom
+
+    for sys, (sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p) in zip(systems, bounds):
 
         # Detect horizontal x extent from staff lines within this system
         sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
@@ -178,11 +207,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
 
     if debug_output_path is not None:
         debug_img = img.copy()
-        for sys in systems:
-            sys_y_min, sys_y_max = sys[0][0], sys[-1][1]
-            padding = (sys_y_max - sys_y_min) * 0.2
-            sys_y_min_p = max(0, int(sys_y_min - padding))
-            sys_y_max_p = min(img_h, int(sys_y_max + padding))
+        for sys, (sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p) in zip(systems, bounds):
 
             sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
             x_profile_sys = np.sum(sys_horiz / 255, axis=0)
