@@ -47,8 +47,8 @@ def train_measure_detector():
     # Train the model
     results = model.train(
         data="data.yaml",
-        epochs=100,
-        imgsz=640,
+        epochs=200,
+        imgsz=1280,
         plots=True,
         device=device,
         degrees=1.0,

@@ -171,18 +171,17 @@ def run_prediction(pdf_path, model_path):
             # Find staves belonging to this system, remove vertical overlaps
             sys_staves = [
                 s for s in staves_all
-                if s["box"][1] >= s_y1 and s["box"][3] <= s_y2
+                if s["box"][1] >= s_y1 - 10 and s["box"][3] <= s_y2 + 10
             ]
             sys_staves = merge_overlapping_staves(sys_staves)
 
-            # Find barlines strictly or nearly in this system vertically
+            # Assign barlines whose vertical center falls within this system
             sys_barlines = [
                 b
                 for b in barlines
                 if b["box"][0] >= s_x1 - 10
                 and b["box"][2] <= s_x2 + 10
-                and b["box"][1] < s_y2
-                and b["box"][3] > s_y1
+                and s_y1 <= (b["box"][1] + b["box"][3]) / 2 <= s_y2
             ]
             sys_barlines.sort(key=lambda x: x["box"][0])
             min_barline_dist = int((s_x2 - s_x1) * 0.02)
