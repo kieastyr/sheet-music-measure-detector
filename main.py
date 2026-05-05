@@ -8,6 +8,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from scripts.pdf_to_images import convert_pdf_to_images, get_pdf_page_count
+from scripts.label_structure import deskew_image
 
 
 def calculate_iou(box1, box2):
@@ -116,6 +117,7 @@ def run_prediction(pdf_path, model_path):
         img = cv2.imread(str(img_path))
         if img is None:
             continue
+        img = deskew_image(img)
 
         # Predict with low conf first to get all candidates
         results = model.predict(source=img, conf=0.1, imgsz=1280, verbose=False)[0]
@@ -167,6 +169,9 @@ def run_prediction(pdf_path, model_path):
             h  = (y2 - y1) / img_h
             return f"{cls_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
+        tol_y = img_h * 0.003  # 縦方向トレランス（画像高さの 0.3%）
+        tol_x = img_w * 0.004  # 横方向トレランス（画像幅の 0.4%）
+
         for sys_idx, sys in enumerate(systems):
             s_x1, s_y1, s_x2, s_y2 = map(int, sys["box"])
             cv2.rectangle(debug_img, (s_x1, s_y1), (s_x2, s_y2), (255, 0, 0), 3)
@@ -185,7 +190,7 @@ def run_prediction(pdf_path, model_path):
             # Find staves belonging to this system, remove vertical overlaps
             sys_staves = [
                 s for s in staves_all
-                if s["box"][1] >= s_y1 - 10 and s["box"][3] <= s_y2 + 10
+                if s["box"][1] >= s_y1 - tol_y and s["box"][3] <= s_y2 + tol_y
             ]
             sys_staves = merge_overlapping_staves(sys_staves)
 
@@ -193,8 +198,8 @@ def run_prediction(pdf_path, model_path):
             sys_barlines = [
                 b
                 for b in barlines
-                if b["box"][0] >= s_x1 - 10
-                and b["box"][2] <= s_x2 + 10
+                if b["box"][0] >= s_x1 - tol_x
+                and b["box"][2] <= s_x2 + tol_x
                 and s_y1 <= (b["box"][1] + b["box"][3]) / 2 <= s_y2
             ]
             sys_barlines.sort(key=lambda x: x["box"][0])
@@ -205,11 +210,9 @@ def run_prediction(pdf_path, model_path):
             for st in sys_staves:
                 st_x1, st_y1_, st_x2, st_y2_ = map(int, st["box"])
                 cv2.rectangle(debug_img, (st_x1, st_y1_), (st_x2, st_y2_), (0, 200, 0), 2)
-                label_lines.append(to_yolo(1, st["box"]))
 
             # Draw barlines for debug
             for b in sys_barlines:
-                label_lines.append(to_yolo(2, b["box"]))
                 bx1, by1, bx2, by2 = map(int, b["box"])
                 cv2.line(
                     debug_img,
@@ -244,6 +247,12 @@ def run_prediction(pdf_path, model_path):
                         2,
                     )
 
+        # Output all staves and barlines regardless of system association
+        for st in staves_all:
+            label_lines.append(to_yolo(1, st["box"]))
+        for b in barlines:
+            label_lines.append(to_yolo(2, b["box"]))
+
         cv2.imwrite(str(output_base / "img" / img_path.name), debug_img)
 
         label_path = output_base / "lbl" / (img_path.stem + ".txt")
@@ -260,7 +269,7 @@ def main():
     parser.add_argument("pdf_path", nargs="?", help="Path to the sheet music PDF")
     parser.add_argument(
         "--model",
-        default="runs/detect/train2/weights/best.pt",
+        default="runs/detect/train3s/weights/best.pt",
         help="Path to the YOLO model",
     )
 

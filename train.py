@@ -19,6 +19,8 @@ def _inject_nonuniform_scale():
                 self.transform = A.Compose(
                     [
                         A.Affine(scale={"x": (0.8, 1.4), "y": (0.8, 2.0)}, p=0.8),
+                        # # ページの反り・波打ちを模倣（sigma 大 = 大きくなだらかな波）
+                        # A.ElasticTransform(alpha=40, sigma=25, p=0.4),
                         # スキャン品質のばらつきを模倣（楽譜は白黒なので contrast が特に重要）
                         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.3, p=0.5),
                         # スキャンノイズ
@@ -39,8 +41,8 @@ def _inject_nonuniform_scale():
 
 def train_measure_detector():
     # Load a pretrained YOLO26m model
-    # model = YOLO("runs/detect/train1/weights/best.pt")
-    model = YOLO("yolo26m.pt")
+    # model = YOLO("runs/detect/train1s/weights/best.pt")
+    model = YOLO("yolo26l.pt")
 
     # Determine device: CUDA > MPS > CPU
     if torch.cuda.is_available():

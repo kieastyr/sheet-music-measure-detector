@@ -65,7 +65,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
     lines_y = []
     current_line = []
     for y in y_indices:
-        if not current_line or y - current_line[-1] <= 3:
+        if not current_line or y - current_line[-1] <= int(img_h * 0.001):
             current_line.append(y)
         else:
             lines_y.append(int(np.mean(current_line)))
@@ -157,7 +157,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
         barlines_x = []
         curr_x_block = []
         for x in x_peaks:
-            if not curr_x_block or x - curr_x_block[-1] < 5:
+            if not curr_x_block or x - curr_x_block[-1] < int(img_w * 0.002):
                 curr_x_block.append(x)
             else:
                 barlines_x.append(int(np.mean(curr_x_block)))
@@ -169,7 +169,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             # Barline Label (class 2)
             bcx = bx / img_w
             bcy = (sys_y_min_p + sys_y_max_p) / 2 / img_h
-            bw = 10 / img_w  # Fixed small width for barline
+            bw = 0.004  # バーライン幅：画像幅の 0.4%
             bh = (sys_y_max_p - sys_y_min_p) / img_h
             yolo_labels.append(f"2 {bcx:.6f} {bcy:.6f} {bw:.6f} {bh:.6f}")
 
@@ -210,7 +210,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             barlines_x = []
             curr_x_block = []
             for x in x_peaks:
-                if not curr_x_block or x - curr_x_block[-1] < 5:
+                if not curr_x_block or x - curr_x_block[-1] < int(img_w * 0.002):
                     curr_x_block.append(x)
                 else:
                     barlines_x.append(int(np.mean(curr_x_block)))
