@@ -113,19 +113,32 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
     yolo_labels = []
     # Class 0: system, Class 1: barline
 
+    x_margin_px = int(img_w * 0.01)
+
     for sys in systems:
         sys_y_min, sys_y_max = sys[0][0], sys[-1][1]
-        # Add padding to system
+        # Add vertical padding to system
         padding = (sys_y_max - sys_y_min) * 0.2
         sys_y_min_p = max(0, int(sys_y_min - padding))
         sys_y_max_p = min(img_h, int(sys_y_max + padding))
 
+        # Detect horizontal x extent from staff lines within this system
+        sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
+        x_profile_sys = np.sum(sys_horiz / 255, axis=0)
+        x_active = np.where(x_profile_sys > 0)[0]
+        if len(x_active) > 0:
+            x_min = max(0, x_active[0] - x_margin_px)
+            x_max = min(img_w, x_active[-1] + x_margin_px)
+        else:
+            x_min, x_max = 0, img_w
+
+        sys_cx = (x_min + x_max) / 2 / img_w
+        sys_w = (x_max - x_min) / img_w
+
         # Save System Label (class 0)
-        cx = 0.5
         cy = (sys_y_min_p + sys_y_max_p) / 2 / img_h
-        w = 1.0
         h = (sys_y_max_p - sys_y_min_p) / img_h
-        yolo_labels.append(f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+        yolo_labels.append(f"0 {sys_cx:.6f} {cy:.6f} {sys_w:.6f} {h:.6f}")
 
         # Save Staff Labels (class 1) — one per stave in the system
         for st_y1, st_y2 in sys:
@@ -134,7 +147,7 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             st_y2_p = min(img_h, int(st_y2 + st_pad))
             st_cy = (st_y1_p + st_y2_p) / 2 / img_h
             st_h = (st_y2_p - st_y1_p) / img_h
-            yolo_labels.append(f"1 0.500000 {st_cy:.6f} 1.000000 {st_h:.6f}")
+            yolo_labels.append(f"1 {sys_cx:.6f} {st_cy:.6f} {sys_w:.6f} {st_h:.6f}")
 
         # Find Barlines within this system
         sys_vert = vertical_lines[sys_y_min:sys_y_max, :]
@@ -170,15 +183,25 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             padding = (sys_y_max - sys_y_min) * 0.2
             sys_y_min_p = max(0, int(sys_y_min - padding))
             sys_y_max_p = min(img_h, int(sys_y_max + padding))
+
+            sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
+            x_profile_sys = np.sum(sys_horiz / 255, axis=0)
+            x_active = np.where(x_profile_sys > 0)[0]
+            if len(x_active) > 0:
+                dbg_x_min = max(0, x_active[0] - x_margin_px)
+                dbg_x_max = min(img_w, x_active[-1] + x_margin_px)
+            else:
+                dbg_x_min, dbg_x_max = 0, img_w - 1
+
             # System: blue
-            cv2.rectangle(debug_img, (0, sys_y_min_p), (img_w - 1, sys_y_max_p), (255, 0, 0), 3)
+            cv2.rectangle(debug_img, (dbg_x_min, sys_y_min_p), (dbg_x_max, sys_y_max_p), (255, 0, 0), 3)
 
             # Staff: green
             for st_y1, st_y2 in sys:
                 st_pad = (st_y2 - st_y1) * 0.3
                 st_y1_p = max(0, int(st_y1 - st_pad))
                 st_y2_p = min(img_h, int(st_y2 + st_pad))
-                cv2.rectangle(debug_img, (0, st_y1_p), (img_w - 1, st_y2_p), (0, 200, 0), 2)
+                cv2.rectangle(debug_img, (dbg_x_min, st_y1_p), (dbg_x_max, st_y2_p), (0, 200, 0), 2)
 
             # Barlines: red
             sys_vert = vertical_lines[sys_y_min:sys_y_max, :]

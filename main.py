@@ -14,72 +14,74 @@ def calculate_iou(box1, box2):
     """Calculates Intersection over Union (IoU) of two bounding boxes."""
     x1_1, y1_1, x2_1, y2_1 = box1
     x1_2, y1_2, x2_2, y2_2 = box2
-    
+
     x_left = max(x1_1, x1_2)
     y_top = max(y1_1, y1_2)
     x_right = min(x2_1, x2_2)
     y_bottom = min(y2_1, y2_2)
-    
+
     if x_right < x_left or y_bottom < y_top:
         return 0.0
-    
+
     intersection_area = (x_right - x_left) * (y_bottom - y_top)
     area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
     area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
-    
+
     return intersection_area / float(area1 + area2 - intersection_area)
 
 
-def find_staves_in_system(sys_img):
-    if sys_img.size == 0:
-        return []
-    
-    gray = cv2.cvtColor(sys_img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-    
-    h, w = thresh.shape
-    # Stronger horizontal kernel to find staff lines
-    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w * 0.2), 1))
-    horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel)
-    
-    y_profile = np.sum(horizontal_lines / 255, axis=1)
-    # Threshold for finding a line
-    y_indices = np.where(y_profile > w * 0.15)[0]
-    
-    lines_y = []
-    current_line = []
-    for y in y_indices:
-        if not current_line or y - current_line[-1] <= 3:
-            current_line.append(y)
-        else:
-            lines_y.append(int(np.mean(current_line)))
-            current_line = [y]
-    if current_line:
-        lines_y.append(int(np.mean(current_line)))
-    
-    if len(lines_y) < 4:
-        return [(0, h)]
 
-    staves = []
-    all_diffs = np.diff(lines_y)
-    # Reasonable staff space range
-    valid_diffs = [d for d in all_diffs if h * 0.005 < d < h * 0.1]
-    if not valid_diffs:
-        return [(0, h)]
-    
-    est_space = np.median(valid_diffs)
-    curr_staff = [lines_y[0]]
-    for y in lines_y[1:]:
-        if abs((y - curr_staff[-1]) - est_space) < est_space * 0.5:
-            curr_staff.append(y)
+def validate_system_box(img, box):
+    """Rejects system detections that contain no horizontal staff content."""
+    x1, y1, x2, y2 = map(int, box)
+    region = img[max(0, y1):y2, max(0, x1):x2]
+    if region.size == 0:
+        return False
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+    w = region.shape[1]
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w * 0.15), 1))
+    horiz_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel)
+    row_density = np.sum(horiz_lines / 255, axis=1)
+    staff_rows = np.sum(row_density > w * 0.1)
+    return staff_rows >= 4
+
+
+def merge_close_barlines(barlines, min_dist_px):
+    """Merges barlines closer than min_dist_px, keeping the highest confidence one per cluster."""
+    if not barlines:
+        return []
+    barlines = sorted(barlines, key=lambda x: x["box"][0])
+    clusters = [[barlines[0]]]
+    for b in barlines[1:]:
+        if b["box"][0] - clusters[-1][-1]["box"][0] < min_dist_px:
+            clusters[-1].append(b)
         else:
-            if len(curr_staff) >= 4:
-                staves.append((curr_staff[0], curr_staff[-1]))
-            curr_staff = [y]
-    if len(curr_staff) >= 4:
-        staves.append((curr_staff[0], curr_staff[-1]))
-        
-    return staves if staves else [(0, h)]
+            clusters.append([b])
+    return [max(c, key=lambda x: x["conf"]) for c in clusters]
+
+
+def merge_overlapping_staves(staves):
+    """Merges staves with >30% vertical overlap into a union bounding box."""
+    if not staves:
+        return []
+    staves = sorted(staves, key=lambda x: x["box"][1])
+    merged = [{"box": list(staves[0]["box"]), "conf": staves[0]["conf"], "class_id": staves[0]["class_id"]}]
+    for s in staves[1:]:
+        y1, y2 = s["box"][1], s["box"][3]
+        my1, my2 = merged[-1]["box"][1], merged[-1]["box"][3]
+        overlap_h = max(0.0, min(y2, my2) - max(y1, my1))
+        if overlap_h / min(y2 - y1, my2 - my1) > 0.3:
+            merged[-1]["box"] = [
+                min(merged[-1]["box"][0], s["box"][0]),
+                min(my1, y1),
+                max(merged[-1]["box"][2], s["box"][2]),
+                max(my2, y2),
+            ]
+            merged[-1]["conf"] = max(merged[-1]["conf"], s["conf"])
+        else:
+            merged.append({"box": list(s["box"]), "conf": s["conf"], "class_id": s["class_id"]})
+    return merged
 
 
 def run_prediction(pdf_path, model_path):
@@ -101,83 +103,131 @@ def run_prediction(pdf_path, model_path):
 
     for page_num in range(1, total_pages + 1):
         print(f"Processing Page {page_num}/{total_pages}...")
-        
-        saved_paths = convert_pdf_to_images(pdf_path, temp_dir, first_page=page_num, last_page=page_num)
-        if not saved_paths: continue
-            
+
+        saved_paths = convert_pdf_to_images(
+            pdf_path, temp_dir, first_page=page_num, last_page=page_num
+        )
+        if not saved_paths:
+            continue
+
         img_path = Path(saved_paths[0])
         img = cv2.imread(str(img_path))
-        if img is None: continue
+        if img is None:
+            continue
 
         # Predict with low conf first to get all candidates
         results = model.predict(source=img, conf=0.1, imgsz=1280, verbose=False)[0]
-        
+
         detections = []
         for box in results.boxes:
-            detections.append({
-                'box': box.xyxy[0].tolist(),
-                'class_id': int(box.cls[0]),
-                'conf': float(box.conf[0])
-            })
-            
+            detections.append(
+                {
+                    "box": box.xyxy[0].tolist(),
+                    "class_id": int(box.cls[0]),
+                    "conf": float(box.conf[0]),
+                }
+            )
+
         # 1. Filter Systems: High confidence and Non-Overlap
-        raw_systems = [d for d in detections if d['class_id'] == 0 and d['conf'] > 0.6]
-        raw_systems.sort(key=lambda x: x['conf'], reverse=True)
-        
+        raw_systems = [d for d in detections if d["class_id"] == 0 and d["conf"] > 0.6]
+        raw_systems.sort(key=lambda x: x["conf"], reverse=True)
+
         systems = []
         for s in raw_systems:
             overlap = False
             for kept_s in systems:
-                if calculate_iou(s['box'], kept_s['box']) > 0.3:
+                if calculate_iou(s["box"], kept_s["box"]) > 0.3:
                     overlap = True
                     break
-            if not overlap:
+            if not overlap and validate_system_box(img, s["box"]):
                 systems.append(s)
-        
-        # 2. Filter Barlines: Moderate confidence
-        barlines = [d for d in detections if d['class_id'] == 1 and d['conf'] > 0.2]
-        
-        print(f"  - Page {page_num}: Found {len(systems)} systems, {len(barlines)} barlines.")
-        
-        systems.sort(key=lambda x: x['box'][1])
+
+        # 2. Filter Staves: Moderate confidence
+        staves_all = [d for d in detections if d["class_id"] == 1 and d["conf"] > 0.4]
+
+        # 3. Filter Barlines: Moderate confidence
+        barlines = [d for d in detections if d["class_id"] == 2 and d["conf"] > 0.2]
+
+        print(
+            f"  - Page {page_num}: Found {len(systems)} systems, {len(staves_all)} staves, {len(barlines)} barlines."
+        )
+
+        systems.sort(key=lambda x: x["box"][1])
         debug_img = img.copy()
-        
+
         for sys_idx, sys in enumerate(systems):
-            s_x1, s_y1, s_x2, s_y2 = map(int, sys['box'])
+            s_x1, s_y1, s_x2, s_y2 = map(int, sys["box"])
             cv2.rectangle(debug_img, (s_x1, s_y1), (s_x2, s_y2), (255, 0, 0), 3)
-            cv2.putText(debug_img, f"Sys {sys_idx}", (s_x1 + 10, s_y1 + 40), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0), 3)
-            
+            cv2.putText(
+                debug_img,
+                f"Sys {sys_idx}",
+                (s_x1 + 10, s_y1 + 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.5,
+                (255, 0, 0),
+                3,
+            )
+
+            # Find staves belonging to this system, remove vertical overlaps
+            sys_staves = [
+                s for s in staves_all
+                if s["box"][1] >= s_y1 and s["box"][3] <= s_y2
+            ]
+            sys_staves = merge_overlapping_staves(sys_staves)
+
             # Find barlines strictly or nearly in this system vertically
-            sys_barlines = [b for b in barlines if b['box'][0] >= s_x1 - 10 and b['box'][2] <= s_x2 + 10 
-                            and b['box'][1] < s_y2 and b['box'][3] > s_y1]
-            sys_barlines.sort(key=lambda x: x['box'][0])
-            
-            # Find staff lines (parts)
-            sys_region = img[s_y1:s_y2, s_x1:s_x2]
-            staves = find_staves_in_system(sys_region)
-            
+            sys_barlines = [
+                b
+                for b in barlines
+                if b["box"][0] >= s_x1 - 10
+                and b["box"][2] <= s_x2 + 10
+                and b["box"][1] < s_y2
+                and b["box"][3] > s_y1
+            ]
+            sys_barlines.sort(key=lambda x: x["box"][0])
+            min_barline_dist = int((s_x2 - s_x1) * 0.02)
+            sys_barlines = merge_close_barlines(sys_barlines, min_barline_dist)
+
+            # Draw staves for debug
+            for st in sys_staves:
+                st_x1, st_y1_, st_x2, st_y2_ = map(int, st["box"])
+                cv2.rectangle(debug_img, (st_x1, st_y1_), (st_x2, st_y2_), (0, 200, 0), 2)
+
             # Draw barlines for debug
             for b in sys_barlines:
-                bx1, by1, bx2, by2 = map(int, b['box'])
-                cv2.line(debug_img, (bx1, max(s_y1, by1)), (bx1, min(s_y2, by2)), (0, 0, 255), 2)
+                bx1, by1, bx2, by2 = map(int, b["box"])
+                cv2.line(
+                    debug_img,
+                    (bx1, max(s_y1, by1)),
+                    (bx1, min(s_y2, by2)),
+                    (0, 0, 255),
+                    2,
+                )
 
             # Construct Measure Grid
             for col_idx in range(len(sys_barlines) - 1):
-                bx1 = int(sys_barlines[col_idx]['box'][0])
-                bx2 = int(sys_barlines[col_idx+1]['box'][0])
-                
-                for row_idx, (st_y1, st_y2) in enumerate(staves):
-                    m_y1, m_y2 = s_y1 + st_y1, s_y1 + st_y2
-                    # Use smaller vertical padding for better accuracy
+                bx1 = int(sys_barlines[col_idx]["box"][0])
+                bx2 = int(sys_barlines[col_idx + 1]["box"][0])
+
+                for row_idx, st in enumerate(sys_staves):
+                    m_y1, m_y2 = int(st["box"][1]), int(st["box"][3])
                     pad = (m_y2 - m_y1) // 4
                     m_y1_p = max(0, m_y1 - pad)
                     m_y2_p = min(img.shape[0], m_y2 + pad)
-                    
-                    cv2.rectangle(debug_img, (bx1, m_y1_p), (bx2, m_y2_p), (0, 255, 0), 2)
+
+                    cv2.rectangle(
+                        debug_img, (bx1, m_y1_p), (bx2, m_y2_p), (0, 165, 255), 2
+                    )
                     label = f"{sys_idx}-{col_idx}-{row_idx}"
-                    cv2.putText(debug_img, label, (bx1 + 10, m_y1 + 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    cv2.putText(
+                        debug_img,
+                        label,
+                        (bx1 + 10, m_y1 + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 165, 255),
+                        2,
+                    )
 
         cv2.imwrite(str(output_base / img_path.name), debug_img)
         img_path.unlink()
@@ -190,9 +240,11 @@ def main():
     parser = argparse.ArgumentParser(description="Sheet Music Measure Detector")
     parser.add_argument("pdf_path", nargs="?", help="Path to the sheet music PDF")
     parser.add_argument(
-        "--model", default="runs/detect/train4/weights/best.pt", help="Path to the YOLO model"
+        "--model",
+        default="runs/detect/train5/weights/best.pt",
+        help="Path to the YOLO model",
     )
-    
+
     args = parser.parse_args()
 
     if not args.pdf_path:
