@@ -135,10 +135,10 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
         sys_cx = (x_min + x_max) / 2 / img_w
         sys_w = (x_max - x_min) / img_w
 
-        # Save System Label (class 0)
+        # Save System Label (class 0) — full page width by default
         cy = (sys_y_min_p + sys_y_max_p) / 2 / img_h
         h = (sys_y_max_p - sys_y_min_p) / img_h
-        yolo_labels.append(f"0 {sys_cx:.6f} {cy:.6f} {sys_w:.6f} {h:.6f}")
+        yolo_labels.append(f"0 0.500000 {cy:.6f} 1.000000 {h:.6f}")
 
         # Save Staff Labels (class 1) — one per stave in the system
         for st_y1, st_y2 in sys:
@@ -193,15 +193,27 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             else:
                 dbg_x_min, dbg_x_max = 0, img_w - 1
 
-            # System: blue
-            cv2.rectangle(debug_img, (dbg_x_min, sys_y_min_p), (dbg_x_max, sys_y_max_p), (255, 0, 0), 3)
+            # System: blue (full page width)
+            cv2.rectangle(
+                debug_img,
+                (0, sys_y_min_p),
+                (img_w - 1, sys_y_max_p),
+                (255, 0, 0),
+                3,
+            )
 
             # Staff: green
             for st_y1, st_y2 in sys:
                 st_pad = (st_y2 - st_y1) * 0.3
                 st_y1_p = max(0, int(st_y1 - st_pad))
                 st_y2_p = min(img_h, int(st_y2 + st_pad))
-                cv2.rectangle(debug_img, (dbg_x_min, st_y1_p), (dbg_x_max, st_y2_p), (0, 200, 0), 2)
+                cv2.rectangle(
+                    debug_img,
+                    (dbg_x_min, st_y1_p),
+                    (dbg_x_max, st_y2_p),
+                    (0, 200, 0),
+                    2,
+                )
 
             # Barlines: red
             sys_vert = vertical_lines[sys_y_min:sys_y_max, :]
@@ -218,15 +230,17 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             if curr_x_block:
                 barlines_x.append(int(np.mean(curr_x_block)))
             for bx in barlines_x:
-                cv2.line(debug_img, (bx, sys_y_min_p), (bx, sys_y_max_p), (0, 0, 255), 2)
+                cv2.line(
+                    debug_img, (bx, sys_y_min_p), (bx, sys_y_max_p), (0, 0, 255), 2
+                )
 
         Path(debug_output_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(debug_output_path), debug_img)
 
 
 def main():
-    img_dir = Path("datasets/measure-detection/images/train")
-    lbl_dir = Path("datasets/measure-detection/labels/train")
+    img_dir = Path("datasets/measure-detection/images/raw0")
+    lbl_dir = Path("datasets/measure-detection/labels/raw0")
     debug_dir = Path("datasets/debug")
     lbl_dir.mkdir(parents=True, exist_ok=True)
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +253,9 @@ def main():
                 print(f"Labeling structural: {img_file.name}")
                 output_txt = lbl_dir / (img_file.stem + ".txt")
                 debug_img_path = debug_dir / img_file.name
-                generate_structural_labels(img_file, output_txt, debug_output_path=debug_img_path)
+                generate_structural_labels(
+                    img_file, output_txt, debug_output_path=debug_img_path
+                )
         except ValueError:
             continue
 
