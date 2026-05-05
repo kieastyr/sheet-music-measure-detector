@@ -17,10 +17,18 @@ def _inject_nonuniform_scale():
             self.contains_spatial = True
             try:
                 self.transform = A.Compose(
-                    [A.Affine(scale={"x": (0.8, 2.0), "y": (0.8, 2.0)}, p=0.8)],
+                    [
+                        A.Affine(scale={"x": (0.8, 1.4), "y": (0.8, 2.0)}, p=0.8),
+                        # スキャン品質のばらつきを模倣（楽譜は白黒なので contrast が特に重要）
+                        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.3, p=0.5),
+                        # スキャンノイズ
+                        A.GaussNoise(p=0.3),
+                        # ピンぼけ・解像度低下
+                        A.Blur(blur_limit=3, p=0.2),
+                    ],
                     bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"]),
                 )
-                print("albumentations: 非均一スケール aug (x/y 各 0.8x–2.0x) を設定しました")
+                print("albumentations: scale / brightness-contrast / noise / blur aug を設定しました")
             except Exception as e:
                 print(f"albumentations: transform の設定に失敗しました: {e}")
 
@@ -30,8 +38,9 @@ def _inject_nonuniform_scale():
 
 
 def train_measure_detector():
-    # Load a pretrained YOLOv8s model
-    model = YOLO("yolov8s.pt")
+    # Load a pretrained YOLO26m model
+    # model = YOLO("runs/detect/train1/weights/best.pt")
+    model = YOLO("yolo26m.pt")
 
     # Determine device: CUDA > MPS > CPU
     if torch.cuda.is_available():
@@ -47,11 +56,16 @@ def train_measure_detector():
     # Train the model
     results = model.train(
         data="data.yaml",
-        epochs=200,
+        epochs=100,
+        patience=20,   # 20エポック改善なしで早期終了
         imgsz=1280,
+        batch=4,       # OOM 対策（VRAM に余裕があれば 8 に上げると速い）
         plots=True,
         device=device,
-        degrees=1.0,
+        degrees=1.0,   # barline は縦線なので大きい回転は有害
+        mosaic=1.0,    # 4枚合成で位置バリエーション（デフォルト値、明示）
+        scale=0.3,     # Albumentations の非均一 scale と重複するため抑え気味
+        copy_paste=0.3,   # インスタンスを別画像にコピーして増強   
     )
     
     # Evaluate model performance on the validation set

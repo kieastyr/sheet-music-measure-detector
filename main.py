@@ -100,6 +100,8 @@ def run_prediction(pdf_path, model_path):
     total_pages = get_pdf_page_count(pdf_path)
     output_base = Path("runs/predict") / Path(pdf_path).stem
     output_base.mkdir(parents=True, exist_ok=True)
+    (output_base / "img").mkdir(parents=True, exist_ok=True)
+    (output_base / "lbl").mkdir(parents=True, exist_ok=True)
 
     for page_num in range(1, total_pages + 1):
         print(f"Processing Page {page_num}/{total_pages}...")
@@ -154,6 +156,16 @@ def run_prediction(pdf_path, model_path):
 
         systems.sort(key=lambda x: x["box"][1])
         debug_img = img.copy()
+        img_h, img_w = img.shape[:2]
+        label_lines = []
+
+        def to_yolo(cls_id, box):
+            x1, y1, x2, y2 = box
+            cx = ((x1 + x2) / 2) / img_w
+            cy = ((y1 + y2) / 2) / img_h
+            w  = (x2 - x1) / img_w
+            h  = (y2 - y1) / img_h
+            return f"{cls_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
         for sys_idx, sys in enumerate(systems):
             s_x1, s_y1, s_x2, s_y2 = map(int, sys["box"])
@@ -167,6 +179,8 @@ def run_prediction(pdf_path, model_path):
                 (255, 0, 0),
                 3,
             )
+
+            label_lines.append(to_yolo(0, sys["box"]))
 
             # Find staves belonging to this system, remove vertical overlaps
             sys_staves = [
@@ -191,9 +205,11 @@ def run_prediction(pdf_path, model_path):
             for st in sys_staves:
                 st_x1, st_y1_, st_x2, st_y2_ = map(int, st["box"])
                 cv2.rectangle(debug_img, (st_x1, st_y1_), (st_x2, st_y2_), (0, 200, 0), 2)
+                label_lines.append(to_yolo(1, st["box"]))
 
             # Draw barlines for debug
             for b in sys_barlines:
+                label_lines.append(to_yolo(2, b["box"]))
                 bx1, by1, bx2, by2 = map(int, b["box"])
                 cv2.line(
                     debug_img,
@@ -228,7 +244,11 @@ def run_prediction(pdf_path, model_path):
                         2,
                     )
 
-        cv2.imwrite(str(output_base / img_path.name), debug_img)
+        cv2.imwrite(str(output_base / "img" / img_path.name), debug_img)
+
+        label_path = output_base / "lbl" / (img_path.stem + ".txt")
+        label_path.write_text("\n".join(label_lines))
+
         img_path.unlink()
 
     shutil.rmtree(temp_dir)
@@ -240,7 +260,7 @@ def main():
     parser.add_argument("pdf_path", nargs="?", help="Path to the sheet music PDF")
     parser.add_argument(
         "--model",
-        default="runs/detect/train5/weights/best.pt",
+        default="runs/detect/train2/weights/best.pt",
         help="Path to the YOLO model",
     )
 
