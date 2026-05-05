@@ -6,6 +6,7 @@ Usage:
 
 Output: runs/debug_labels/<split>/
 """
+
 import argparse
 from pathlib import Path
 
@@ -15,9 +16,9 @@ import numpy as np
 DATASET_ROOT = Path("datasets/measure-detection")
 
 CLASS_COLORS = {
-    0: (255, 80,  80),   # system  — blue
-    1: (80,  200, 80),   # staff   — green
-    2: (80,  80,  255),  # barline — red
+    0: (255, 80, 80),  # system  — blue
+    1: (80, 200, 80),  # staff   — green
+    2: (80, 80, 255),  # barline — red
 }
 CLASS_NAMES = {0: "system", 1: "staff", 2: "barline"}
 
@@ -27,8 +28,9 @@ def draw_yolo_labels(img, label_path):
     debug = img.copy()
 
     if not label_path.exists():
-        cv2.putText(debug, "NO LABEL", (20, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 3)
+        cv2.putText(
+            debug, "NO LABEL", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 3
+        )
         return debug
 
     counts = {0: 0, 1: 0, 2: 0}
@@ -36,7 +38,13 @@ def draw_yolo_labels(img, label_path):
         parts = line.strip().split()
         if len(parts) != 5:
             continue
-        cls, cx, cy, bw, bh = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+        cls, cx, cy, bw, bh = (
+            int(parts[0]),
+            float(parts[1]),
+            float(parts[2]),
+            float(parts[3]),
+            float(parts[4]),
+        )
 
         x1 = int((cx - bw / 2) * w)
         y1 = int((cy - bh / 2) * h)
@@ -48,24 +56,38 @@ def draw_yolo_labels(img, label_path):
         cv2.rectangle(debug, (x1, y1), (x2, y2), color, thickness)
 
         if cls != 2:  # skip label text for barlines (too many)
-            cv2.putText(debug, CLASS_NAMES.get(cls, str(cls)),
-                        (x1 + 4, y1 + 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+            cv2.putText(
+                debug,
+                CLASS_NAMES.get(cls, str(cls)),
+                (x1 + 4, y1 + 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                color,
+                2,
+            )
 
         counts[cls] = counts.get(cls, 0) + 1
 
     # Stats overlay (top-left)
     for cls_id, name in CLASS_NAMES.items():
-        cv2.putText(debug, f"{name}: {counts.get(cls_id, 0)}",
-                    (16, 50 + cls_id * 44),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, CLASS_COLORS[cls_id], 2)
+        cv2.putText(
+            debug,
+            f"{name}: {counts.get(cls_id, 0)}",
+            (16, 50 + cls_id * 44),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.3,
+            CLASS_COLORS[cls_id],
+            2,
+        )
 
     return debug
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", default="raw", choices=["raw", "train", "val"])
+    parser.add_argument(
+        "--split", default="raw0", choices=["raw0", "raw", "train", "val"]
+    )
     args = parser.parse_args()
 
     img_dir = DATASET_ROOT / "images" / args.split
