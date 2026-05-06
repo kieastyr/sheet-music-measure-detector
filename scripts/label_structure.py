@@ -1,43 +1,11 @@
 import cv2
 import numpy as np
 from pathlib import Path
-import math
 
-
-def deskew_image(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY_INV)
-    img_w = img.shape[1]
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(img_w * 0.05), 1))
-    horiz = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    lines = cv2.HoughLinesP(
-        horiz, 1, np.pi / 180, 100, minLineLength=int(img_w * 0.1), maxLineGap=20
-    )
-    if lines is None:
-        return img
-    angles = []
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
-        if -10 < angle < 10:
-            angles.append(angle)
-    if not angles:
-        return img
-    median_angle = np.median(angles)
-    if abs(median_angle) < 0.05:
-        return img
-    h, w = img.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-    return cv2.warpAffine(
-        img,
-        M,
-        (w, h),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255),
-    )
+try:
+    from scripts.sheet_cv import deskew_image, detect_systems_cv, detect_barlines_in_system
+except ImportError:
+    from sheet_cv import deskew_image, detect_systems_cv, detect_barlines_in_system
 
 
 def generate_structural_labels(image_path, output_txt_path, debug_output_path=None):
@@ -47,111 +15,40 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
     img = deskew_image(img)
     img_h, img_w = img.shape[:2]
 
+    sys_groups, est_space = detect_systems_cv(img)
+    if not sys_groups or est_space == 0.0:
+        return
+
+    # x範囲検出用に horizontal_lines を再計算
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-
-    # Detect horizontal lines for systems
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(img_w * 0.1), 1))
     horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel)
 
-    # Detect vertical lines for barlines
-    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(img_h * 0.02)))
-    vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vert_kernel)
-
-    # 1. Find Staff Lines -> Systems
-    y_profile = np.sum(horizontal_lines / 255, axis=1)
-    y_indices = np.where(y_profile > img_w * 0.1)[0]
-
-    lines_y = []
-    current_line = []
-    for y in y_indices:
-        if not current_line or y - current_line[-1] <= int(img_h * 0.001):
-            current_line.append(y)
-        else:
-            lines_y.append(int(np.mean(current_line)))
-            current_line = [y]
-    if current_line:
-        lines_y.append(int(np.mean(current_line)))
-
-    if len(lines_y) < 4:
-        return
-
-    # Group into staves, then systems
-    staves = []
-    if lines_y:
-        all_diffs = np.diff(lines_y)
-        valid_diffs = [d for d in all_diffs if img_h * 0.002 < d < img_h * 0.02]
-        if not valid_diffs:
-            return
-        est_space = np.median(valid_diffs)
-
-        curr_staff = [lines_y[0]]
-        for y in lines_y[1:]:
-            if abs((y - curr_staff[-1]) - est_space) < est_space * 0.4:
-                curr_staff.append(y)
-            else:
-                if len(curr_staff) >= 4:
-                    staves.append((curr_staff[0], curr_staff[-1]))
-                curr_staff = [y]
-        if len(curr_staff) >= 4:
-            staves.append((curr_staff[0], curr_staff[-1]))
-
-    if not staves:
-        return
-
-    systems = []
-    curr_sys = [staves[0]]
-    for i in range(1, len(staves)):
-        if staves[i][0] - curr_sys[-1][1] > img_h * 0.05:
-            systems.append(curr_sys)
-            curr_sys = [staves[i]]
-        else:
-            curr_sys.append(staves[i])
-    if curr_sys:
-        systems.append(curr_sys)
-
-    # Merge adjacent systems that are connected by barlines spanning the gap.
-    # If a vertical line crosses more than 30% of the inter-system gap,
-    # the two systems belong to the same grand staff and should be unified.
-    merged = [systems[0]]
-    for i in range(1, len(systems)):
-        gap_top = merged[-1][-1][1]      # bottom of last stave in previous system
-        gap_bot = systems[i][0][0]       # top of first stave in current system
-        if gap_bot > gap_top:
-            gap_vert = vertical_lines[gap_top:gap_bot, :]
-            col_density = np.sum(gap_vert / 255, axis=0)
-            threshold = (gap_bot - gap_top) * 0.3
-            if np.any(col_density > threshold):
-                merged[-1] = merged[-1] + systems[i]
-                continue
-        merged.append(systems[i])
-    systems = merged
-
-    yolo_labels = []
-    # Class 0: system, Class 1: barline
-
     x_margin_px = int(img_w * 0.01)
     half_staff = int(est_space) // 2
-    padding    = int(est_space * 4 * 2.0)
+    padding = int(est_space * 4 * 2.0)
 
-    # Pass 1: set shared boundaries at midpoint ± half_staff between adjacent systems.
-    # Start from bare content extents (sys_y_min / sys_y_max).
+    # Pass 1: 隣接 system 間の共有境界を midpoint ± half_staff に設定
     bounds = [
-        [int(sys[0][0]), int(sys[-1][1]), int(sys[0][0]), int(sys[-1][1])]
-        for sys in systems
+        [int(g[0][0]), int(g[-1][1]), int(g[0][0]), int(g[-1][1])]
+        for g in sys_groups
     ]
     for i in range(len(bounds) - 1):
         mid = (bounds[i][1] + bounds[i + 1][0]) // 2
-        bounds[i][3]     = int(mid + half_staff)  # A's bottom (shared side)
-        bounds[i + 1][2] = int(mid - half_staff)  # B's top    (shared side)
+        bounds[i][3] = int(mid + half_staff)
+        bounds[i + 1][2] = int(mid - half_staff)
+    # Pass 2: 外側エッジにのみ padding を付与
+    bounds[0][2] = int(max(0, bounds[0][0] - padding))
+    bounds[-1][3] = int(min(img_h, bounds[-1][1] + padding))
 
-    # Pass 2: add padding only to the outermost (non-shared) edges.
-    bounds[0][2]  = int(max(0,     bounds[0][0]  - padding))  # first system top
-    bounds[-1][3] = int(min(img_h, bounds[-1][1] + padding))  # last system bottom
+    yolo_labels = []
+    sys_barlines_all = []  # debug描画用に保持
 
-    for sys, (sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p) in zip(systems, bounds):
+    for sys_staves, bound in zip(sys_groups, bounds):
+        sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p = bound
 
-        # Detect horizontal x extent from staff lines within this system
+        # x 範囲をスタッフラインの水平分布から検出
         sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
         x_profile_sys = np.sum(sys_horiz / 255, axis=0)
         x_active = np.where(x_profile_sys > 0)[0]
@@ -162,52 +59,38 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             x_min, x_max = 0, img_w
 
         sys_cx = (x_min + x_max) / 2 / img_w
-        sys_w = (x_max - x_min) / img_w
+        sys_w_norm = (x_max - x_min) / img_w
 
-        # Save System Label (class 0) — full page width by default
+        # System label (class 0) — 全幅固定
         cy = (sys_y_min_p + sys_y_max_p) / 2 / img_h
         h = (sys_y_max_p - sys_y_min_p) / img_h
         yolo_labels.append(f"0 0.500000 {cy:.6f} 1.000000 {h:.6f}")
 
-        # Save Staff Labels (class 1) — one per stave in the system
-        for st_y1, st_y2 in sys:
+        # Staff labels (class 1) — system 内の各 stave
+        for st_y1, st_y2 in sys_staves:
             st_pad = (st_y2 - st_y1) * 0.3
             st_y1_p = max(0, int(st_y1 - st_pad))
             st_y2_p = min(img_h, int(st_y2 + st_pad))
             st_cy = (st_y1_p + st_y2_p) / 2 / img_h
             st_h = (st_y2_p - st_y1_p) / img_h
-            yolo_labels.append(f"1 {sys_cx:.6f} {st_cy:.6f} {sys_w:.6f} {st_h:.6f}")
+            yolo_labels.append(f"1 {sys_cx:.6f} {st_cy:.6f} {sys_w_norm:.6f} {st_h:.6f}")
 
-        # Find Barlines within this system
-        sys_vert = vertical_lines[sys_y_min:sys_y_max, :]
-        x_profile = np.sum(sys_vert / 255, axis=0)
-        x_peaks = np.where(x_profile > (sys_y_max - sys_y_min) * 0.2)[0]
-
-        barlines_x = []
-        curr_x_block = []
-        for x in x_peaks:
-            if not curr_x_block or x - curr_x_block[-1] < int(img_w * 0.002):
-                curr_x_block.append(x)
-            else:
-                barlines_x.append(int(np.mean(curr_x_block)))
-                curr_x_block = [x]
-        if curr_x_block:
-            barlines_x.append(int(np.mean(curr_x_block)))
-
+        # Barline labels (class 2)
+        barlines_x = detect_barlines_in_system(img, 0, sys_y_min, img_w, sys_y_max)
+        sys_barlines_all.append(barlines_x)
         for bx in barlines_x:
-            # Barline Label (class 2)
             bcx = bx / img_w
             bcy = (sys_y_min_p + sys_y_max_p) / 2 / img_h
-            bw = 0.004  # バーライン幅：画像幅の 0.4%
             bh = (sys_y_max_p - sys_y_min_p) / img_h
-            yolo_labels.append(f"2 {bcx:.6f} {bcy:.6f} {bw:.6f} {bh:.6f}")
+            yolo_labels.append(f"2 {bcx:.6f} {bcy:.6f} 0.004000 {bh:.6f}")
 
     with open(output_txt_path, "w") as f:
         f.write("\n".join(yolo_labels))
 
     if debug_output_path is not None:
         debug_img = img.copy()
-        for sys, (sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p) in zip(systems, bounds):
+        for sys_staves, bound, barlines_x in zip(sys_groups, bounds, sys_barlines_all):
+            sys_y_min, sys_y_max, sys_y_min_p, sys_y_max_p = bound
 
             sys_horiz = horizontal_lines[sys_y_min:sys_y_max, :]
             x_profile_sys = np.sum(sys_horiz / 255, axis=0)
@@ -218,46 +101,16 @@ def generate_structural_labels(image_path, output_txt_path, debug_output_path=No
             else:
                 dbg_x_min, dbg_x_max = 0, img_w - 1
 
-            # System: blue (full page width)
-            cv2.rectangle(
-                debug_img,
-                (0, sys_y_min_p),
-                (img_w - 1, sys_y_max_p),
-                (255, 0, 0),
-                3,
-            )
+            cv2.rectangle(debug_img, (0, sys_y_min_p), (img_w - 1, sys_y_max_p), (255, 0, 0), 3)
 
-            # Staff: green
-            for st_y1, st_y2 in sys:
+            for st_y1, st_y2 in sys_staves:
                 st_pad = (st_y2 - st_y1) * 0.3
                 st_y1_p = max(0, int(st_y1 - st_pad))
                 st_y2_p = min(img_h, int(st_y2 + st_pad))
-                cv2.rectangle(
-                    debug_img,
-                    (dbg_x_min, st_y1_p),
-                    (dbg_x_max, st_y2_p),
-                    (0, 200, 0),
-                    2,
-                )
+                cv2.rectangle(debug_img, (dbg_x_min, st_y1_p), (dbg_x_max, st_y2_p), (0, 200, 0), 2)
 
-            # Barlines: red
-            sys_vert = vertical_lines[sys_y_min:sys_y_max, :]
-            x_profile = np.sum(sys_vert / 255, axis=0)
-            x_peaks = np.where(x_profile > (sys_y_max - sys_y_min) * 0.2)[0]
-            barlines_x = []
-            curr_x_block = []
-            for x in x_peaks:
-                if not curr_x_block or x - curr_x_block[-1] < int(img_w * 0.002):
-                    curr_x_block.append(x)
-                else:
-                    barlines_x.append(int(np.mean(curr_x_block)))
-                    curr_x_block = [x]
-            if curr_x_block:
-                barlines_x.append(int(np.mean(curr_x_block)))
             for bx in barlines_x:
-                cv2.line(
-                    debug_img, (bx, sys_y_min_p), (bx, sys_y_max_p), (0, 0, 255), 2
-                )
+                cv2.line(debug_img, (bx, sys_y_min_p), (bx, sys_y_max_p), (0, 0, 255), 2)
 
         Path(debug_output_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(debug_output_path), debug_img)
@@ -271,7 +124,6 @@ def main():
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     for img_file in sorted(img_dir.glob("*.png")):
-        # Extract page number
         try:
             page_num = int(img_file.stem.split("_page_")[-1])
             if 2 <= page_num <= 23 or True:

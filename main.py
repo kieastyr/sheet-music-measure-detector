@@ -8,7 +8,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from scripts.pdf_to_images import convert_pdf_to_images, get_pdf_page_count
-from scripts.label_structure import deskew_image
+from scripts.sheet_cv import deskew_image, detect_systems_cv, detect_barlines_in_system
 
 
 def calculate_iou(box1, box2):
@@ -85,6 +85,31 @@ def merge_overlapping_staves(staves):
     return merged
 
 
+def combine_systems(yolo_systems, cv_extents, img_w, img_h, y_iou_thresh=0.5):
+    """YOLOとCVのsystem候補を統合。Y軸IoU NMSでより小さい（細かい）方を優先する。"""
+    cv_systems = [
+        {"box": [0.0, float(y1), float(img_w), float(y2)], "conf": 0.7, "class_id": 0, "source": "cv"}
+        for y1, y2 in cv_extents
+    ]
+    all_candidates = yolo_systems + cv_systems
+    # Y方向スパンが小さい順（細かい方優先）でNMS
+    all_candidates.sort(key=lambda s: s["box"][3] - s["box"][1])
+    kept = []
+    for cand in all_candidates:
+        y1_c, y2_c = cand["box"][1], cand["box"][3]
+        suppressed = False
+        for k in kept:
+            y1_k, y2_k = k["box"][1], k["box"][3]
+            overlap = max(0.0, min(y2_c, y2_k) - max(y1_c, y1_k))
+            union = max(y2_c, y2_k) - min(y1_c, y1_k)
+            if union > 0 and overlap / union > y_iou_thresh:
+                suppressed = True
+                break
+        if not suppressed:
+            kept.append(cand)
+    return sorted(kept, key=lambda s: s["box"][1])
+
+
 def run_prediction(pdf_path, model_path):
     temp_dir = Path("temp_prediction_images")
     if temp_dir.exists():
@@ -133,7 +158,7 @@ def run_prediction(pdf_path, model_path):
             )
 
         # 1. Filter Systems: High confidence and Non-Overlap
-        raw_systems = [d for d in detections if d["class_id"] == 0 and d["conf"] > 0.6]
+        raw_systems = [d for d in detections if d["class_id"] == 0 and d["conf"] > 0.3]
         raw_systems.sort(key=lambda x: x["conf"], reverse=True)
 
         systems = []
@@ -146,11 +171,16 @@ def run_prediction(pdf_path, model_path):
             if not overlap and validate_system_box(img, s["box"]):
                 systems.append(s)
 
+        # CVによるsystem検出と統合（より細分化された方を優先）
+        cv_groups, _ = detect_systems_cv(img)
+        cv_extents = [(g[0][0], g[-1][1]) for g in cv_groups]
+        systems = combine_systems(systems, cv_extents, img.shape[1], img.shape[0])
+
         # 2. Filter Staves: Moderate confidence
         staves_all = [d for d in detections if d["class_id"] == 1 and d["conf"] > 0.4]
 
-        # 3. Filter Barlines: Moderate confidence
-        barlines = [d for d in detections if d["class_id"] == 2 and d["conf"] > 0.2]
+        # 3. Filter Barlines: YOLOの最低閾値と合わせる
+        barlines = [d for d in detections if d["class_id"] == 2 and d["conf"] > 0.1]
 
         print(
             f"  - Page {page_num}: Found {len(systems)} systems, {len(staves_all)} staves, {len(barlines)} barlines."
@@ -159,7 +189,26 @@ def run_prediction(pdf_path, model_path):
         systems.sort(key=lambda x: x["box"][1])
         debug_img = img.copy()
         img_h, img_w = img.shape[:2]
+
+        # systemのx範囲を画像の左右端に揃える
+        for s in systems:
+            s["box"][0] = 0.0
+            s["box"][2] = float(img_w)
+
+        # 隣接system間のY境界をmidpointで分割（重なり防止）
+        if len(systems) > 1:
+            if staves_all:
+                median_stave_h = float(np.median([s["box"][3] - s["box"][1] for s in staves_all]))
+                half_margin = max(5, int(median_stave_h / (1.6 * 4)))
+            else:
+                half_margin = int(img_h * 0.01)
+            for i in range(len(systems) - 1):
+                mid = int((systems[i]["box"][3] + systems[i + 1]["box"][1]) / 2)
+                systems[i]["box"][3] = float(min(img_h, mid + half_margin))
+                systems[i + 1]["box"][1] = float(max(0, mid - half_margin))
+
         label_lines = []
+        final_barlines = []  # YOLO + CVフォールバックを集約
 
         def to_yolo(cls_id, box):
             x1, y1, x2, y2 = box
@@ -206,19 +255,33 @@ def run_prediction(pdf_path, model_path):
             min_barline_dist = int((s_x2 - s_x1) * 0.02)
             sys_barlines = merge_close_barlines(sys_barlines, min_barline_dist)
 
+            # YOLOで十分検出できない場合はCVフォールバック
+            if len(sys_barlines) < 2:
+                cv_xs = detect_barlines_in_system(img, s_x1, s_y1, s_x2, s_y2)
+                cv_bls = [
+                    {"box": [float(x - 2), float(s_y1), float(x + 2), float(s_y2)], "conf": 0.5, "class_id": 2, "source": "cv"}
+                    for x in cv_xs
+                ]
+                if len(cv_bls) > len(sys_barlines):
+                    sys_barlines = merge_close_barlines(cv_bls, min_barline_dist)
+                    print(f"    (sys {sys_idx}: CV fallback → {len(sys_barlines)} barlines)")
+
+            final_barlines.extend(sys_barlines)
+
             # Draw staves for debug
             for st in sys_staves:
                 st_x1, st_y1_, st_x2, st_y2_ = map(int, st["box"])
                 cv2.rectangle(debug_img, (st_x1, st_y1_), (st_x2, st_y2_), (0, 200, 0), 2)
 
-            # Draw barlines for debug
+            # Draw barlines for debug (YOLO=明るいオレンジ, CV=暗いオレンジ)
             for b in sys_barlines:
                 bx1, by1, bx2, by2 = map(int, b["box"])
+                color = (0, 80, 200) if b.get("source") == "cv" else (0, 180, 255)
                 cv2.line(
                     debug_img,
                     (bx1, max(s_y1, by1)),
                     (bx1, min(s_y2, by2)),
-                    (0, 0, 255),
+                    color,
                     2,
                 )
 
@@ -247,10 +310,10 @@ def run_prediction(pdf_path, model_path):
                         2,
                     )
 
-        # Output all staves and barlines regardless of system association
+        # ラベル出力: staveは全件、barlineはsystem割り当て済みのもの（YOLO+CV）
         for st in staves_all:
             label_lines.append(to_yolo(1, st["box"]))
-        for b in barlines:
+        for b in final_barlines:
             label_lines.append(to_yolo(2, b["box"]))
 
         cv2.imwrite(str(output_base / "img" / img_path.name), debug_img)
@@ -269,7 +332,7 @@ def main():
     parser.add_argument("pdf_path", nargs="?", help="Path to the sheet music PDF")
     parser.add_argument(
         "--model",
-        default="runs/detect/train3s/weights/best.pt",
+        default="runs/detect/train4s/weights/best.pt",
         help="Path to the YOLO model",
     )
 
